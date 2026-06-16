@@ -173,6 +173,10 @@
             color: #86efac;
         }
 
+        .status-message.warning {
+            color: #fcd34d;
+        }
+
         /* Progress Bar */
         .progress-container {
             width: 100%;
@@ -688,13 +692,14 @@
                 <div class="step-header">
                     <span class="step-tag">Cadastro da Empresa</span>
                     <h2 class="step-title">Informe a empresa que será avaliada</h2>
-                    <p class="step-desc">Use a API da empresaqui para preencher automaticamente os dados básicos da empresa antes de iniciar o questionário.</p>
+                    <p class="step-desc">Use a API da empresaqui para tentar preencher automaticamente os dados básicos da empresa. Se a consulta falhar ou se houver dados faltando, voce ainda podera continuar e responder o formulario manualmente.</p>
                 </div>
 
                 <div class="company-form">
                     <div class="field-group field-full">
                         <label for="companyIdentifier">CNPJ ou identificador da empresa</label>
                         <input id="companyIdentifier" type="text" placeholder="Digite o CNPJ ou código de busca">
+                        <p class="helper-text">A busca do CNPJ serve como apoio ao preenchimento. Ela nao e obrigatoria para continuar.</p>
                     </div>
 
                     <div class="company-grid">
@@ -731,7 +736,7 @@
                     <button class="btn-back" onclick="prevStep(0)">Voltar</button>
                     <div style="display: flex; gap: 0.75rem; flex-wrap: wrap; justify-content: flex-end;">
                         <button class="btn-back" type="button" onclick="lookupCompany()">Buscar dados</button>
-                        <button class="btn-primary" id="companyContinueBtn" type="button" onclick="nextStep(2)" disabled>Continuar para o questionário</button>
+                        <button class="btn-primary" id="companyContinueBtn" type="button" onclick="nextStep(2)">Continuar para o questionário</button>
                     </div>
                 </div>
             </div>
@@ -1081,6 +1086,8 @@
 
         const companyStatus = document.getElementById('companyStatus');
         const companyContinueBtn = document.getElementById('companyContinueBtn');
+        const CNPJ_ERROR_MESSAGE = 'Conferir o numero do CNPJ - faca o preenchimento das informacoes abaixo';
+        const COMPANY_OPTIONAL_MESSAGE = 'O cadastro da empresa nao bloqueia o formulario. Se preferir, continue e preencha manualmente depois.';
         const reportTitle = document.getElementById('reportTitle');
         const reportSubtitle = document.getElementById('reportSubtitle');
         const reportStatus = document.getElementById('reportStatus');
@@ -1143,20 +1150,34 @@
             companyInputs.email.value = data?.email || '';
         }
 
+        function normalizeDocument(value) {
+            return String(value || '').replace(/\D/g, '');
+        }
+
+        function isCnpjLikeInput(value) {
+            return /^[\d.\-\/\s]+$/.test(String(value || '').trim());
+        }
+
+        function hasCompanyLookupData(data) {
+            return Boolean(
+                data?.name ||
+                data?.responsible ||
+                data?.city ||
+                data?.state ||
+                data?.cnae ||
+                data?.email
+            );
+        }
+
+        function showCompanyLookupWarning() {
+            setCompanyStatus(CNPJ_ERROR_MESSAGE, 'warning');
+        }
+
         function validateCompanyForm() {
-            const hasRequiredFields =
-                companyInputs.identifier.value.trim() &&
-                companyInputs.name.value.trim() &&
-                companyInputs.responsible.value.trim() &&
-                companyInputs.city.value.trim() &&
-                companyInputs.state.value.trim() &&
-                companyInputs.cnae.value.trim() &&
-                companyInputs.email.value.trim();
+            companyContinueBtn.disabled = false;
 
-            companyContinueBtn.disabled = !hasRequiredFields;
-
-            if (hasRequiredFields) {
-                setCompanyStatus('Dados da empresa prontos.', 'success');
+            if (!companyStatus.textContent.trim()) {
+                setCompanyStatus(COMPANY_OPTIONAL_MESSAGE);
             }
         }
 
@@ -1758,23 +1779,31 @@
         }
 
         async function lookupCompany() {
-            const identifier = companyInputs.identifier.value.trim();
-            companyData.identifier = identifier;
+            const rawIdentifier = companyInputs.identifier.value.trim();
+            const normalizedIdentifier = normalizeDocument(rawIdentifier);
+            const identifier = normalizedIdentifier || rawIdentifier;
+            companyData.identifier = rawIdentifier;
 
-            if (!identifier) {
-                setCompanyStatus('Informe um CNPJ ou identificador para buscar os dados da empresa.', 'error');
+            if (!rawIdentifier) {
+                showCompanyLookupWarning();
+                validateCompanyForm();
+                return;
+            }
+
+            if (isCnpjLikeInput(rawIdentifier) && normalizedIdentifier.length !== 14) {
+                showCompanyLookupWarning();
                 validateCompanyForm();
                 return;
             }
 
             if (!API_BASE_URL) {
-                setCompanyStatus('Modo manual ativo. Preencha os campos da empresa para continuar.', 'error');
+                showCompanyLookupWarning();
                 validateCompanyForm();
                 return;
             }
 
             setCompanyStatus('Buscando dados da empresa...', '');
-            companyContinueBtn.disabled = true;
+            companyContinueBtn.disabled = false;
 
             try {
                 const response = await fetch(`${API_BASE_URL}/api/company/lookup?documento=${encodeURIComponent(identifier)}`, {
@@ -1784,22 +1813,8 @@
                     }
                 });
 
-                if (!response.ok) {
-                    let backendMessage = `Resposta inválida da API (${response.status})`;
-                    try {
-                        const errorBody = await response.json();
-                        backendMessage = errorBody?.message || errorBody?.error || backendMessage;
-                        if (errorBody?.hint) {
-                            backendMessage = `${backendMessage} ${errorBody.hint}`;
-                        }
-                    } catch (_parseError) {
-                        // Keep the generic status message if the body is not JSON.
-                    }
-                    throw new Error(backendMessage);
-                }
-
-                const data = await response.json();
-                companyData = {
+                const data = await response.json().catch(() => null);
+                const normalizedCompanyData = {
                     identifier,
                     name: data?.nome || '',
                     responsible: data?.responsavel || '',
@@ -1810,6 +1825,16 @@
                     source: data?.source || ''
                 };
 
+                if (!response.ok || !hasCompanyLookupData(normalizedCompanyData)) {
+                    console.warn('Falha na consulta de CNPJ:', {
+                        status: response.status,
+                        responseOk: response.ok,
+                        data
+                    });
+                    throw new Error('company_lookup_failed');
+                }
+
+                companyData = normalizedCompanyData;
                 fillCompanyFields(companyData);
                 const sourceLabel = companyData.source === 'empresaqui'
                     ? 'EmpresaAqui'
@@ -1819,15 +1844,23 @@
                 setCompanyStatus(`Dados carregados com sucesso via ${sourceLabel}.`, 'success');
                 validateCompanyForm();
             } catch (error) {
-                console.error(error);
+                console.error('Erro na consulta de CNPJ:', error);
                 try {
-                companyData = await lookupCompanyPublic(identifier);
-                fillCompanyFields(companyData);
-                setCompanyStatus('EmpresaAqui indisponível. Dados carregados via fallback público.', 'success');
-                validateCompanyForm();
+                    if (normalizedIdentifier.length !== 14) {
+                        throw new Error('fallback_requires_cnpj');
+                    }
+
+                    companyData = await lookupCompanyPublic(identifier);
+                    if (!hasCompanyLookupData(companyData)) {
+                        throw new Error('fallback_missing_company_data');
+                    }
+
+                    fillCompanyFields(companyData);
+                    setCompanyStatus('Dados carregados com sucesso via consulta automatica.', 'success');
+                    validateCompanyForm();
                 } catch (fallbackError) {
-                    console.error(fallbackError);
-                    setCompanyStatus(error.message || 'Não foi possível consultar a API da empresaqui. Você pode preencher os campos manualmente para continuar.', 'error');
+                    console.error('Erro na consulta de CNPJ:', fallbackError);
+                    showCompanyLookupWarning();
                     validateCompanyForm();
                 }
             }
